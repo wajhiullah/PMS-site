@@ -6,6 +6,7 @@
   <title>Events – PIEAS Materials Society</title>
   <meta name="description" content="Browse upcoming and past events organized by PMS PIEAS – seminars, workshops, competitions, industrial visits, and alumni talks.">
   <link rel="stylesheet" href="/assets/style.css">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 </head>
 <body>
 <div id="announcement-banner" class="banner" style="display:none"></div>
@@ -39,6 +40,22 @@
 <section class="section">
   <div class="container">
     <div id="events-grid" class="grid grid-3"><div class="spinner"></div></div>
+  </div>
+</section>
+
+<!-- Certificate Verification Section -->
+<section class="section" style="background:rgba(255,255,255,.01);border-top:1px solid var(--border)" aria-labelledby="verify-heading">
+  <div class="container" style="max-width:560px;text-align:center">
+    <span class="badge">Digital Credentials</span>
+    <h2 id="verify-heading" style="margin:.75rem 0">Verify Participation Certificate</h2>
+    <p style="color:var(--text-muted);margin-bottom:1.5rem">Enter your unique certificate code (e.g. PMS-1-XXXX) to authenticate event participation.</p>
+    <form id="verify-form" novalidate>
+      <div style="display:flex;gap:.75rem;flex-wrap:wrap;justify-content:center">
+        <input id="verify-code" class="form-control" placeholder="PMS-1-XXXXXXXX" required style="flex:1;min-width:200px" aria-label="Certificate Code">
+        <button type="submit" class="btn btn-primary" id="verify-submit">Verify</button>
+      </div>
+      <div id="verify-msg" style="margin-top:1rem"></div>
+    </form>
   </div>
 </section>
 
@@ -118,7 +135,7 @@ document.getElementById('reg-form').addEventListener('submit', async (ev) => {
       email:        document.getElementById('reg-email').value,
       phone:        document.getElementById('reg-phone').value || null,
     });
-    PMS.showAlert(msgEl, `✅ Registered! Certificate code: <strong>${PMS.escHtml(result.certificate_code)}</strong>`, 'success');
+    PMS.showAlert(msgEl, `✅ Registered! Certificate code: <strong>${PMS.escHtml(result.certificate_code)}</strong>`, 'success', true);
   } catch(e) {
     PMS.showAlert(msgEl, e.message || 'Registration failed.');
   } finally {
@@ -133,6 +150,27 @@ document.querySelectorAll('.filter-btn').forEach(btn => {
     const f = btn.dataset.filter;
     loadEvents(f === '' ? null : f === 'true');
   });
+});
+
+document.getElementById('verify-form').addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  const btn = document.getElementById('verify-submit');
+  const msgEl = document.getElementById('verify-msg');
+  const code = document.getElementById('verify-code').value.trim();
+  if (!code) { PMS.showAlert(msgEl, 'Please enter a certificate code.'); return; }
+  PMS.setLoading(btn, true);
+  try {
+    const res = await PMS.apiFetch(`/api/certificates/verify?code=${encodeURIComponent(code)}`);
+    if (res.valid) {
+      PMS.showAlert(msgEl, `🎓 <strong>Verified!</strong> ${PMS.escHtml(res.student_name)} participated in <em>${PMS.escHtml(res.event_title)}</em> (Code: ${PMS.escHtml(res.certificate_code)}).`, 'success', true);
+    } else {
+      PMS.showAlert(msgEl, '❌ Invalid certificate code. Please verify the code and try again.', 'error');
+    }
+  } catch(e) {
+    PMS.showAlert(msgEl, e.message || 'Verification failed.');
+  } finally {
+    PMS.setLoading(btn, false);
+  }
 });
 
 loadEvents(null);

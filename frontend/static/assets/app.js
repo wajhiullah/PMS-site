@@ -49,8 +49,8 @@ async function apiDelete(path) {
 function qs(sel, ctx = document) { return ctx.querySelector(sel); }
 function qsa(sel, ctx = document) { return [...ctx.querySelectorAll(sel)]; }
 
-function showAlert(container, message, type = 'error') {
-  container.innerHTML = `<div class="alert alert-${type}" role="alert">${escHtml(message)}</div>`;
+function showAlert(container, message, type = 'error', isHtml = false) {
+  container.innerHTML = `<div class="alert alert-${type}" role="alert">${isHtml ? message : escHtml(message)}</div>`;
 }
 
 function escHtml(str) {

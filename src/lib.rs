@@ -165,6 +165,7 @@ pub fn create_app(pool: SqlitePool) -> Router {
         .route_service("/sponsors", ServeFile::new("frontend/static/sponsors.html"))
         .route_service("/join", ServeFile::new("frontend/static/join.html"))
         .route_service("/admin", ServeFile::new("frontend/static/admin.html"))
+        .route_service("/404", ServeFile::new("frontend/static/404.html"))
         // Everything else → static directory (serves assets, or index.html fallback)
         .fallback_service(static_service)
         .layer(middleware::from_fn(security_headers))

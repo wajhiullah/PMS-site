@@ -172,7 +172,12 @@ async fn test_upload_file_allowed_and_forbidden() {
 
     let body = res_allowed.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert!(json["url"].as_str().unwrap().starts_with("/uploads/"));
+    let url_str = json["url"].as_str().unwrap();
+    assert!(url_str.starts_with("/uploads/"));
+
+    // Clean up temporary test file from uploads directory
+    let file_path = url_str.trim_start_matches('/');
+    let _ = tokio::fs::remove_file(file_path).await;
 }
 
 #[tokio::test]

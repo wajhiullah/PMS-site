@@ -5,6 +5,7 @@
   <title>Join PMS – PIEAS Materials Society</title>
   <meta name="description" content="Apply to join PIEAS Materials Society and become part of the DMME student community.">
   <link rel="stylesheet" href="/assets/style.css">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 </head>
 <body>
 <div id="announcement-banner" class="banner" style="display:none"></div>
@@ -24,6 +25,20 @@
       <div class="form-group"><label class="form-label" for="join-why">Why do you want to join PMS?</label><textarea id="join-why" class="form-control" placeholder="Tell us your motivation..."></textarea></div>
       <div id="join-msg"></div>
       <button type="submit" class="btn btn-primary" style="width:100%;margin-top:.5rem" id="join-submit">Submit Application</button>
+    </form>
+  </div>
+  <div class="card" style="margin-top:2rem">
+    <h2 style="margin-bottom:1.5rem">Contact PMS</h2>
+    <p style="color:var(--text-muted);font-size:.875rem;margin-bottom:1.5rem">
+      Have a question for the PMS executive council, workshop suggestions, or collaboration inquiries? Send us a message.
+    </p>
+    <form id="contact-form" novalidate>
+      <div class="form-group"><label class="form-label" for="contact-name">Name *</label><input id="contact-name" class="form-control" required placeholder="Your full name"></div>
+      <div class="form-group"><label class="form-label" for="contact-email">Email *</label><input id="contact-email" type="email" class="form-control" required placeholder="your@email.com"></div>
+      <div class="form-group"><label class="form-label" for="contact-subject">Subject</label><input id="contact-subject" class="form-control" placeholder="Inquiry subject"></div>
+      <div class="form-group"><label class="form-label" for="contact-message">Message *</label><textarea id="contact-message" class="form-control" required placeholder="Your message..."></textarea></div>
+      <div id="contact-msg"></div>
+      <button type="submit" class="btn btn-primary" style="width:100%;margin-top:.5rem" id="contact-submit">Send Message</button>
     </form>
   </div>
 </div></section>
@@ -50,6 +65,27 @@ document.getElementById('join-form').addEventListener('submit', async ev => {
     document.getElementById('join-form').reset();
   } catch(e) {
     PMS.showAlert(msg, e.message || 'Submission failed. Please try again.');
+  } finally {
+    PMS.setLoading(btn, false);
+  }
+});
+
+document.getElementById('contact-form').addEventListener('submit', async ev => {
+  ev.preventDefault();
+  const btn = document.getElementById('contact-submit');
+  const msg = document.getElementById('contact-msg');
+  PMS.setLoading(btn, true);
+  try {
+    await PMS.apiPost('/api/contact', {
+      name:    document.getElementById('contact-name').value,
+      email:   document.getElementById('contact-email').value,
+      subject: document.getElementById('contact-subject').value || null,
+      message: document.getElementById('contact-message').value,
+    });
+    PMS.showAlert(msg, '✉️ Message sent! We will get back to you soon.', 'success');
+    document.getElementById('contact-form').reset();
+  } catch(e) {
+    PMS.showAlert(msg, e.message || 'Message could not be sent. Please try again.');
   } finally {
     PMS.setLoading(btn, false);
   }

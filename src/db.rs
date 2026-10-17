@@ -309,7 +309,7 @@ pub async fn seed_data(pool: &SqlitePool) {
                 .to_string();
 
             sqlx::query(
-                "INSERT OR IGNORE INTO admin_users (email, password_hash, name) VALUES (?1, ?2, ?3)",
+                "INSERT INTO admin_users (email, password_hash, name) VALUES (?1, ?2, ?3) ON CONFLICT(email) DO UPDATE SET password_hash = excluded.password_hash, name = excluded.name",
             )
             .bind(&admin_email)
             .bind(&password_hash)
