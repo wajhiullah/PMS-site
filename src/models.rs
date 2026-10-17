@@ -475,4 +475,3 @@ pub struct UpdateSiteSection {
     pub badge: Option<String>,
     pub extra_json: Option<String>,
 }
-

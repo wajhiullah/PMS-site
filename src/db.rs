@@ -6,8 +6,8 @@ use std::str::FromStr;
 
 /// Initialize the SQLite connection pool with WAL mode and foreign keys.
 pub async fn init_pool() -> SqlitePool {
-    let db_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "sqlite://pms.db?mode=rwc".to_string());
+    let db_url =
+        std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite://pms.db?mode=rwc".to_string());
     let options = SqliteConnectOptions::from_str(&db_url)
         .expect("Invalid DB URL")
         .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
@@ -255,8 +255,16 @@ pub async fn run_migrations(pool: &SqlitePool) {
     tracing::info!("✅ Database migrations complete");
 }
 
-
 pub async fn seed_data(pool: &SqlitePool) {
+    let seed_data = std::env::var("SEED_DATA")
+        .map(|v| v.to_lowercase() != "false")
+        .unwrap_or(true);
+
+    if !seed_data {
+        tracing::info!("SEED_DATA=false, skipping database seeding.");
+        return;
+    }
+
     let team_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM team_members")
         .fetch_one(pool)
         .await
@@ -269,25 +277,69 @@ pub async fn seed_data(pool: &SqlitePool) {
 
     tracing::info!("Seeding database with initial academic society records...");
 
-    let admin_email = std::env::var("ADMIN_INITIAL_EMAIL")
-        .unwrap_or_else(|_| "admin@pms.pieas.edu.pk".to_string());
-    let admin_password = std::env::var("ADMIN_INITIAL_PASSWORD")
-        .unwrap_or_else(|_| "PMS@Admin2026".to_string());
+    // --- Admin user seeding is EXPLICITLY GATED behind SEED_ADMIN=true ---
+    //
+    // This prevents an automatic default admin account from being created
+    // during normal startup.  To seed an admin intentionally, set:
+    //   SEED_ADMIN=true
+    //   ADMIN_INITIAL_EMAIL=admin@example.com
+    //   ADMIN_INITIAL_PASSWORD=<strong-password>
+    let seed_admin = std::env::var("SEED_ADMIN")
+        .unwrap_or_default()
+        .to_lowercase()
+        == "true";
 
-    let salt = SaltString::generate(&mut OsRng);
-    let argon2 = Argon2::default();
-    let password_hash = argon2
-        .hash_password(admin_password.as_bytes(), &salt)
-        .expect("Failed to hash password")
-        .to_string();
+    if seed_admin {
+        let admin_email = match std::env::var("ADMIN_INITIAL_EMAIL") {
+            Ok(e) if !e.is_empty() => e,
+            _ => {
+                tracing::error!(
+                    "SEED_ADMIN=true but ADMIN_INITIAL_EMAIL is not set. \
+                     Skipping admin seeding."
+                );
+                // We still continue to seed the rest of the demo data.
+                String::new()
+            }
+        };
 
-    sqlx::query("INSERT OR IGNORE INTO admin_users (email, password_hash, name) VALUES (?1, ?2, ?3)")
-        .bind(&admin_email)
-        .bind(&password_hash)
-        .bind("PMS Admin")
-        .execute(pool)
-        .await
-        .expect("Failed to seed admin user");
+        let admin_password = match std::env::var("ADMIN_INITIAL_PASSWORD") {
+            Ok(p) if p.len() >= 8 => p,
+            _ => {
+                tracing::error!(
+                    "SEED_ADMIN=true but ADMIN_INITIAL_PASSWORD is missing or too short. \
+                     Skipping admin seeding."
+                );
+                String::new()
+            }
+        };
+
+        if !admin_email.is_empty() && !admin_password.is_empty() {
+            let salt = SaltString::generate(&mut OsRng);
+            let argon2 = Argon2::default();
+            let password_hash = argon2
+                .hash_password(admin_password.as_bytes(), &salt)
+                .expect("Failed to hash password")
+                .to_string();
+
+            sqlx::query(
+                "INSERT OR IGNORE INTO admin_users (email, password_hash, name) VALUES (?1, ?2, ?3)",
+            )
+            .bind(&admin_email)
+            .bind(&password_hash)
+            .bind("PMS Admin")
+            .execute(pool)
+            .await
+            .expect("Failed to seed admin user");
+
+            tracing::info!(email = %admin_email, "✅ Admin user seeded (SEED_ADMIN=true)");
+        }
+    } else {
+        tracing::info!(
+            "SEED_ADMIN is not set to 'true'. \
+             No admin user will be created automatically. \
+             Set SEED_ADMIN=true with credentials to create one."
+        );
+    }
 
     sqlx::query(
         "INSERT OR IGNORE INTO site_stats (id, active_members, events_held, years_active, industrial_partners, constitution_pdf_url, office_location, contact_email) VALUES (1, 85, 42, 6, 12, '/uploads/pms-constitution.pdf', 'Department of Metallurgy & Materials Engineering (DMME) Block, PIEAS, Nilore, Islamabad', 'pms@pieas.edu.pk')"
@@ -477,7 +529,7 @@ The Continuous Cooling Transformation diagram maps these transformations as a fu
         ('Pakistan Atomic Energy Commission (PAEC)', 'https://www.paec.gov.pk/', 'Platinum'),
         ('Heavy Mechanical Complex (HMC) Taxila', 'https://www.hmc.com.pk/', 'Gold'),
         ('Pakistan Steel Mills Corporation', 'https://www.paksteel.com.pk/', 'Silver'),
-        ('ASM International — Pakistan Chapter', 'https://www.asminternational.org/', 'Partner')"#
+        ('ASM International — Pakistan Chapter', 'https://www.asminternational.org/', 'Partner')"#,
     )
     .execute(pool)
     .await
