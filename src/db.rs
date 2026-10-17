@@ -265,18 +265,6 @@ pub async fn seed_data(pool: &SqlitePool) {
         return;
     }
 
-    let team_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM team_members")
-        .fetch_one(pool)
-        .await
-        .unwrap_or((0,));
-
-    if team_count.0 > 0 {
-        tracing::info!("Database already seeded with team members, skipping.");
-        return;
-    }
-
-    tracing::info!("Seeding database with initial academic society records...");
-
     // --- Admin user seeding is EXPLICITLY GATED behind SEED_ADMIN=true ---
     //
     // This prevents an automatic default admin account from being created
@@ -297,7 +285,6 @@ pub async fn seed_data(pool: &SqlitePool) {
                     "SEED_ADMIN=true but ADMIN_INITIAL_EMAIL is not set. \
                      Skipping admin seeding."
                 );
-                // We still continue to seed the rest of the demo data.
                 String::new()
             }
         };
@@ -340,6 +327,18 @@ pub async fn seed_data(pool: &SqlitePool) {
              Set SEED_ADMIN=true with credentials to create one."
         );
     }
+
+    let team_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM team_members")
+        .fetch_one(pool)
+        .await
+        .unwrap_or((0,));
+
+    if team_count.0 > 0 {
+        tracing::info!("Database already seeded with team members, skipping.");
+        return;
+    }
+
+    tracing::info!("Seeding database with initial academic society records...");
 
     sqlx::query(
         "INSERT OR IGNORE INTO site_stats (id, active_members, events_held, years_active, industrial_partners, constitution_pdf_url, office_location, contact_email) VALUES (1, 85, 42, 6, 12, '/uploads/pms-constitution.pdf', 'Department of Metallurgy & Materials Engineering (DMME) Block, PIEAS, Nilore, Islamabad', 'pms@pieas.edu.pk')"
