@@ -1,65 +1,190 @@
+use std::os::unix::fs::PermissionsExt;
+
 use argon2::{Argon2, PasswordHash, PasswordVerifier};
 use axum::{
     extract::{Multipart, Path, State},
     routing::{delete, get, post, put},
     Json, Router,
 };
+use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use sqlx::SqlitePool;
+use time::Duration;
 
-use crate::auth::create_token;
+use crate::auth::{create_token, JWT_COOKIE_NAME};
 use crate::error::AppError;
 use crate::models::*;
+use crate::rate_limit::{client_ip_from_headers, RateLimitState};
+
+// ---------------------------------------------------------------------------
+// Allowed MIME types for file uploads
+// ---------------------------------------------------------------------------
+
+const ALLOWED_MIME_TYPES: &[&str] = &[
+    "image/png",
+    "image/jpeg",
+    "image/webp",
+    "application/pdf",
+    "text/plain",
+];
+
+/// Extensions that are explicitly blocked regardless of content-type header.
+const BLOCKED_EXTENSIONS: &[&str] = &[
+    ".exe", ".sh", ".bash", ".php", ".pl", ".cgi", ".js", ".py", ".rb", ".bat", ".cmd", ".ps1",
+    ".vbs", ".jar", ".war", ".class", ".elf",
+];
 
 pub fn admin_routes() -> Router<SqlitePool> {
     Router::new()
         // Auth
         .route("/api/auth/login", post(login))
+        .route("/api/auth/logout", post(logout))
         // Upload
         .route("/api/admin/upload", post(upload_file))
         // Generic CRUD for all models
-        .route("/api/admin/announcements", get(list_announcements).post(create_announcement))
-        .route("/api/admin/announcements/{id}", put(update_announcement).delete(delete_announcement))
+        .route(
+            "/api/admin/announcements",
+            get(list_announcements).post(create_announcement),
+        )
+        .route(
+            "/api/admin/announcements/{id}",
+            put(update_announcement).delete(delete_announcement),
+        )
         .route("/api/admin/stats", get(get_stats).put(update_stats))
         .route("/api/admin/stats/{id}", put(update_stats_by_id))
         .route("/api/admin/events", get(list_events).post(create_event))
-        .route("/api/admin/events/{id}", put(update_event).delete(delete_event))
+        .route(
+            "/api/admin/events/{id}",
+            put(update_event).delete(delete_event),
+        )
         .route("/api/admin/registrations", get(list_registrations))
         .route("/api/admin/registrations/{id}", delete(delete_registration))
         .route("/api/admin/team", get(list_team).post(create_team_member))
-        .route("/api/admin/team/{id}", put(update_team_member).delete(delete_team_member))
-        .route("/api/admin/gallery", get(list_gallery).post(create_gallery_image))
-        .route("/api/admin/gallery/{id}", put(update_gallery_image).delete(delete_gallery_image))
+        .route(
+            "/api/admin/team/{id}",
+            put(update_team_member).delete(delete_team_member),
+        )
+        .route(
+            "/api/admin/gallery",
+            get(list_gallery).post(create_gallery_image),
+        )
+        .route(
+            "/api/admin/gallery/{id}",
+            put(update_gallery_image).delete(delete_gallery_image),
+        )
         .route("/api/admin/posts", get(list_posts).post(create_post))
-        .route("/api/admin/posts/{id}", put(update_post).delete(delete_post))
-        .route("/api/admin/resources", get(list_resources).post(create_resource))
-        .route("/api/admin/resources/{id}", put(update_resource).delete(delete_resource))
-        .route("/api/admin/opportunities", get(list_opportunities).post(create_opportunity))
-        .route("/api/admin/opportunities/{id}", put(update_opportunity).delete(delete_opportunity))
+        .route(
+            "/api/admin/posts/{id}",
+            put(update_post).delete(delete_post),
+        )
+        .route(
+            "/api/admin/resources",
+            get(list_resources).post(create_resource),
+        )
+        .route(
+            "/api/admin/resources/{id}",
+            put(update_resource).delete(delete_resource),
+        )
+        .route(
+            "/api/admin/opportunities",
+            get(list_opportunities).post(create_opportunity),
+        )
+        .route(
+            "/api/admin/opportunities/{id}",
+            put(update_opportunity).delete(delete_opportunity),
+        )
         .route("/api/admin/alumni", get(list_alumni).post(create_alumnus))
-        .route("/api/admin/alumni/{id}", put(update_alumnus).delete(delete_alumnus))
-        .route("/api/admin/projects", get(list_projects).post(create_project))
-        .route("/api/admin/projects/{id}", put(update_project).delete(delete_project))
-        .route("/api/admin/sponsors", get(list_sponsors).post(create_sponsor))
-        .route("/api/admin/sponsors/{id}", put(update_sponsor).delete(delete_sponsor))
+        .route(
+            "/api/admin/alumni/{id}",
+            put(update_alumnus).delete(delete_alumnus),
+        )
+        .route(
+            "/api/admin/projects",
+            get(list_projects).post(create_project),
+        )
+        .route(
+            "/api/admin/projects/{id}",
+            put(update_project).delete(delete_project),
+        )
+        .route(
+            "/api/admin/sponsors",
+            get(list_sponsors).post(create_sponsor),
+        )
+        .route(
+            "/api/admin/sponsors/{id}",
+            put(update_sponsor).delete(delete_sponsor),
+        )
         .route("/api/admin/faqs", get(list_faqs).post(create_faq))
         .route("/api/admin/faqs/{id}", put(update_faq).delete(delete_faq))
-        .route("/api/admin/membership", get(list_membership).post(create_membership_from_admin))
-        .route("/api/admin/membership/{id}", put(update_membership_status).delete(delete_membership))
+        .route(
+            "/api/admin/membership",
+            get(list_membership).post(create_membership_from_admin),
+        )
+        .route(
+            "/api/admin/membership/{id}",
+            put(update_membership_status).delete(delete_membership),
+        )
         .route("/api/admin/contacts", get(list_contacts))
         .route("/api/admin/contacts/{id}", delete(delete_contact))
         .route("/api/admin/newsletter", get(list_newsletter))
         .route("/api/admin/newsletter/{id}", delete(delete_subscriber))
-        .route("/api/admin/sections", get(list_sections).post(create_section))
-        .route("/api/admin/sections/{id}", put(update_section).delete(delete_section))
+        .route(
+            "/api/admin/sections",
+            get(list_sections).post(create_section),
+        )
+        .route(
+            "/api/admin/sections/{id}",
+            put(update_section).delete(delete_section),
+        )
 }
 
+// ---------------------------------------------------------------------------
 // Auth
+// ---------------------------------------------------------------------------
+
+/// Returns `true` if the server is running in production mode.
+fn is_production() -> bool {
+    std::env::var("RUST_ENV").unwrap_or_default().to_lowercase() == "production"
+}
+
+/// Build the auth cookie with appropriate security attributes.
+fn build_auth_cookie(token: String) -> Cookie<'static> {
+    let secure = std::env::var("JWT_COOKIE_SECURE")
+        .map(|v| v.to_lowercase() != "false")
+        .unwrap_or(is_production());
+
+    let cookie_name =
+        std::env::var("JWT_COOKIE_NAME").unwrap_or_else(|_| JWT_COOKIE_NAME.to_string());
+
+    let mut cookie = Cookie::new(cookie_name, token);
+    cookie.set_http_only(true);
+    cookie.set_secure(secure);
+    cookie.set_same_site(SameSite::Lax);
+    cookie.set_path("/");
+    cookie.set_max_age(Duration::hours(24));
+    cookie
+}
 
 #[axum::debug_handler]
 async fn login(
     State(pool): State<SqlitePool>,
+    jar: CookieJar,
+    headers: axum::http::HeaderMap,
     Json(payload): Json<LoginRequest>,
-) -> Result<Json<LoginResponse>, AppError> {
+) -> Result<(CookieJar, Json<LoginResponse>), AppError> {
+    // Enforce rate limiting per client IP
+    let ip = client_ip_from_headers(&headers);
+    RateLimitState::global().check_login(ip)?;
+
+    // Basic input validation
+    if payload.email.is_empty() || payload.password.is_empty() {
+        return Err(AppError::BadRequest(
+            "Email and password are required".into(),
+        ));
+    }
+    if payload.email.len() > 254 {
+        return Err(AppError::BadRequest("Email too long".into()));
+    }
+
     let user = sqlx::query_as::<_, AdminUser>(
         "SELECT id, email, password_hash, name FROM admin_users WHERE email = ?1",
     )
@@ -68,22 +193,50 @@ async fn login(
     .await?
     .ok_or(AppError::Unauthorized)?;
 
-    let parsed_hash =
-        PasswordHash::new(&user.password_hash).map_err(|_| AppError::Internal("Hash parse error".into()))?;
+    let parsed_hash = PasswordHash::new(&user.password_hash)
+        .map_err(|_| AppError::Internal("Hash parse error".into()))?;
     Argon2::default()
         .verify_password(payload.password.as_bytes(), &parsed_hash)
         .map_err(|_| AppError::Unauthorized)?;
 
     let token = create_token(user.id, &user.email)?;
 
-    Ok(Json(LoginResponse {
-        token,
-        name: user.name,
-        email: user.email,
-    }))
+    // Set httpOnly cookie
+    let cookie = build_auth_cookie(token.clone());
+    let updated_jar = jar.add(cookie);
+
+    tracing::info!(user_id = user.id, email = %user.email, "Admin login successful");
+
+    Ok((
+        updated_jar,
+        Json(LoginResponse {
+            token,
+            name: user.name,
+            email: user.email,
+        }),
+    ))
 }
 
-// File Upload
+#[axum::debug_handler]
+async fn logout(jar: CookieJar) -> (CookieJar, Json<serde_json::Value>) {
+    let cookie_name =
+        std::env::var("JWT_COOKIE_NAME").unwrap_or_else(|_| JWT_COOKIE_NAME.to_string());
+
+    let removal = Cookie::build((cookie_name, ""))
+        .path("/")
+        .max_age(Duration::seconds(0))
+        .build();
+
+    let updated_jar = jar.remove(removal);
+    (
+        updated_jar,
+        Json(serde_json::json!({"message": "Logged out successfully"})),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// File Upload (hardened)
+// ---------------------------------------------------------------------------
 
 #[axum::debug_handler]
 async fn upload_file(
@@ -100,13 +253,25 @@ async fn upload_file(
             .map(|n| n.to_string())
             .unwrap_or_else(|| format!("{}.bin", uuid::Uuid::new_v4()));
 
+        // Strip directory traversal attempts.
         let file_name = std::path::Path::new(&raw_name)
             .file_name()
             .and_then(|n| n.to_str())
-            .unwrap_or("upload.bin");
+            .unwrap_or("upload.bin")
+            .to_string();
 
-        let safe_name = format!("{}_{}", uuid::Uuid::new_v4(), file_name);
-        let path = format!("uploads/{}", safe_name);
+        // Check for blocked extensions.
+        let lower = file_name.to_lowercase();
+        for blocked in BLOCKED_EXTENSIONS {
+            if lower.ends_with(blocked) {
+                return Err(AppError::BadRequest(format!(
+                    "File type not allowed: {}",
+                    blocked
+                )));
+            }
+        }
+
+        let declared_ct = field.content_type().map(|s| s.to_string());
 
         let data = field
             .bytes()
@@ -117,9 +282,50 @@ async fn upload_file(
             return Err(AppError::BadRequest("File exceeds 20MB limit".into()));
         }
 
+        // Sniff the actual MIME type from magic bytes.
+        let sniffed_mime = infer::get(&data)
+            .map(|t| t.mime_type())
+            .unwrap_or("application/octet-stream");
+
+        // Allow only the whitelisted MIME types.
+        if !ALLOWED_MIME_TYPES.contains(&sniffed_mime) {
+            return Err(AppError::BadRequest(format!(
+                "File content type '{}' is not allowed. Allowed: {}",
+                sniffed_mime,
+                ALLOWED_MIME_TYPES.join(", ")
+            )));
+        }
+
+        // Cross-check declared vs sniffed content type (informational log).
+        if let Some(ref declared) = declared_ct {
+            if declared != sniffed_mime {
+                tracing::warn!(
+                    declared = %declared,
+                    sniffed = %sniffed_mime,
+                    "Content-Type mismatch between declared and sniffed MIME"
+                );
+            }
+        }
+
+        // Generate a safe filename (UUID prefix + original name, no path components).
+        let safe_name = format!("{}_{}", uuid::Uuid::new_v4(), file_name);
+        let path = format!("uploads/{}", safe_name);
+
         tokio::fs::write(&path, &data)
             .await
             .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        // Set permissions to rw-r--r-- (0o644) — non-executable.
+        tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        tracing::info!(
+            filename = %safe_name,
+            mime = %sniffed_mime,
+            size = data.len(),
+            "File uploaded successfully"
+        );
 
         return Ok(Json(UploadResponse {
             url: format!("/{}", path),
@@ -130,7 +336,9 @@ async fn upload_file(
     Err(AppError::BadRequest("No file provided".into()))
 }
 
+// ---------------------------------------------------------------------------
 // Announcements
+// ---------------------------------------------------------------------------
 
 #[axum::debug_handler]
 async fn list_announcements(
@@ -149,12 +357,24 @@ async fn create_announcement(
     State(pool): State<SqlitePool>,
     Json(p): Json<CreateAnnouncement>,
 ) -> Result<Json<DeleteResponse>, AppError> {
+    // Validate
+    if p.message.trim().is_empty() {
+        return Err(AppError::BadRequest("message is required".into()));
+    }
+    if p.message.len() > 1000 {
+        return Err(AppError::BadRequest(
+            "message must be at most 1000 characters".into(),
+        ));
+    }
+
     sqlx::query("INSERT INTO announcements (message, link_text, link_url, priority, is_active) VALUES (?1,?2,?3,?4,?5)")
         .bind(&p.message).bind(&p.link_text).bind(&p.link_url)
         .bind(p.priority.as_deref().unwrap_or("info"))
         .bind(p.is_active.unwrap_or(true))
         .execute(&pool).await?;
-    Ok(Json(DeleteResponse { message: "Created".into() }))
+    Ok(Json(DeleteResponse {
+        message: "Created".into(),
+    }))
 }
 
 #[axum::debug_handler]
@@ -164,13 +384,18 @@ async fn update_announcement(
     Path(id): Path<i64>,
     Json(p): Json<CreateAnnouncement>,
 ) -> Result<Json<DeleteResponse>, AppError> {
+    if p.message.trim().is_empty() {
+        return Err(AppError::BadRequest("message is required".into()));
+    }
     sqlx::query("UPDATE announcements SET message=?1, link_text=?2, link_url=?3, priority=?4, is_active=?5 WHERE id=?6")
         .bind(&p.message).bind(&p.link_text).bind(&p.link_url)
         .bind(p.priority.as_deref().unwrap_or("info"))
         .bind(p.is_active.unwrap_or(true))
         .bind(id)
         .execute(&pool).await?;
-    Ok(Json(DeleteResponse { message: "Updated".into() }))
+    Ok(Json(DeleteResponse {
+        message: "Updated".into(),
+    }))
 }
 
 #[axum::debug_handler]
@@ -179,11 +404,18 @@ async fn delete_announcement(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
 ) -> Result<Json<DeleteResponse>, AppError> {
-    sqlx::query("DELETE FROM announcements WHERE id=?1").bind(id).execute(&pool).await?;
-    Ok(Json(DeleteResponse { message: "Deleted".into() }))
+    sqlx::query("DELETE FROM announcements WHERE id=?1")
+        .bind(id)
+        .execute(&pool)
+        .await?;
+    Ok(Json(DeleteResponse {
+        message: "Deleted".into(),
+    }))
 }
 
+// ---------------------------------------------------------------------------
 // Site Stats
+// ---------------------------------------------------------------------------
 
 #[axum::debug_handler]
 async fn get_stats(
@@ -206,7 +438,9 @@ async fn update_stats(
         .bind(p.active_members).bind(p.events_held).bind(p.years_active).bind(p.industrial_partners)
         .bind(&p.constitution_pdf_url).bind(&p.office_location).bind(&p.contact_email)
         .execute(&pool).await?;
-    Ok(Json(DeleteResponse { message: "Updated".into() }))
+    Ok(Json(DeleteResponse {
+        message: "Updated".into(),
+    }))
 }
 
 #[axum::debug_handler]
@@ -220,10 +454,14 @@ async fn update_stats_by_id(
         .bind(p.active_members).bind(p.events_held).bind(p.years_active).bind(p.industrial_partners)
         .bind(&p.constitution_pdf_url).bind(&p.office_location).bind(&p.contact_email)
         .execute(&pool).await?;
-    Ok(Json(DeleteResponse { message: "Updated".into() }))
+    Ok(Json(DeleteResponse {
+        message: "Updated".into(),
+    }))
 }
 
+// ---------------------------------------------------------------------------
 // Events CRUD
+// ---------------------------------------------------------------------------
 
 #[axum::debug_handler]
 async fn list_events(
@@ -242,6 +480,19 @@ async fn create_event(
     State(pool): State<SqlitePool>,
     Json(p): Json<CreateEvent>,
 ) -> Result<Json<DeleteResponse>, AppError> {
+    // Validation
+    if p.title.trim().is_empty() {
+        return Err(AppError::BadRequest("title is required".into()));
+    }
+    if p.title.len() > 300 {
+        return Err(AppError::BadRequest(
+            "title must be at most 300 characters".into(),
+        ));
+    }
+    if p.date.trim().is_empty() {
+        return Err(AppError::BadRequest("date is required".into()));
+    }
+
     let slug = p.slug.unwrap_or_else(|| slugify(&p.title));
     sqlx::query("INSERT INTO events (title,slug,date,time_range,venue,category,short_description,full_summary,poster_url,registration_link,speaker_or_organizer,is_past,is_featured) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)")
         .bind(&p.title).bind(&slug).bind(&p.date).bind(&p.time_range).bind(&p.venue)
@@ -250,7 +501,9 @@ async fn create_event(
         .bind(&p.registration_link).bind(&p.speaker_or_organizer)
         .bind(p.is_past.unwrap_or(false)).bind(p.is_featured.unwrap_or(false))
         .execute(&pool).await?;
-    Ok(Json(DeleteResponse { message: "Created".into() }))
+    Ok(Json(DeleteResponse {
+        message: "Created".into(),
+    }))
 }
 
 #[axum::debug_handler]
@@ -260,6 +513,9 @@ async fn update_event(
     Path(id): Path<i64>,
     Json(p): Json<CreateEvent>,
 ) -> Result<Json<DeleteResponse>, AppError> {
+    if p.title.trim().is_empty() {
+        return Err(AppError::BadRequest("title is required".into()));
+    }
     let slug = p.slug.unwrap_or_else(|| slugify(&p.title));
     sqlx::query("UPDATE events SET title=?1,slug=?2,date=?3,time_range=?4,venue=?5,category=?6,short_description=?7,full_summary=?8,poster_url=?9,registration_link=?10,speaker_or_organizer=?11,is_past=?12,is_featured=?13 WHERE id=?14")
         .bind(&p.title).bind(&slug).bind(&p.date).bind(&p.time_range).bind(&p.venue)
@@ -269,7 +525,9 @@ async fn update_event(
         .bind(p.is_past.unwrap_or(false)).bind(p.is_featured.unwrap_or(false))
         .bind(id)
         .execute(&pool).await?;
-    Ok(Json(DeleteResponse { message: "Updated".into() }))
+    Ok(Json(DeleteResponse {
+        message: "Updated".into(),
+    }))
 }
 
 #[axum::debug_handler]
@@ -278,11 +536,18 @@ async fn delete_event(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
 ) -> Result<Json<DeleteResponse>, AppError> {
-    sqlx::query("DELETE FROM events WHERE id=?1").bind(id).execute(&pool).await?;
-    Ok(Json(DeleteResponse { message: "Deleted".into() }))
+    sqlx::query("DELETE FROM events WHERE id=?1")
+        .bind(id)
+        .execute(&pool)
+        .await?;
+    Ok(Json(DeleteResponse {
+        message: "Deleted".into(),
+    }))
 }
 
+// ---------------------------------------------------------------------------
 // Registrations (Read/Delete)
+// ---------------------------------------------------------------------------
 
 #[axum::debug_handler]
 async fn list_registrations(
@@ -301,11 +566,18 @@ async fn delete_registration(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
 ) -> Result<Json<DeleteResponse>, AppError> {
-    sqlx::query("DELETE FROM event_registrations WHERE id=?1").bind(id).execute(&pool).await?;
-    Ok(Json(DeleteResponse { message: "Deleted".into() }))
+    sqlx::query("DELETE FROM event_registrations WHERE id=?1")
+        .bind(id)
+        .execute(&pool)
+        .await?;
+    Ok(Json(DeleteResponse {
+        message: "Deleted".into(),
+    }))
 }
 
+// ---------------------------------------------------------------------------
 // Team Members CRUD
+// ---------------------------------------------------------------------------
 
 #[axum::debug_handler]
 async fn list_team(
@@ -324,13 +596,21 @@ async fn create_team_member(
     State(pool): State<SqlitePool>,
     Json(p): Json<CreateTeamMember>,
 ) -> Result<Json<DeleteResponse>, AppError> {
+    if p.name.trim().is_empty() {
+        return Err(AppError::BadRequest("name is required".into()));
+    }
+    if p.role.trim().is_empty() {
+        return Err(AppError::BadRequest("role is required".into()));
+    }
     sqlx::query("INSERT INTO team_members (name,role,role_responsibility,photo_url,batch,tenure_year,is_current,is_faculty_advisor,bio,linkedin_url,email,display_order) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)")
         .bind(&p.name).bind(&p.role).bind(&p.role_responsibility).bind(&p.photo_url)
         .bind(&p.batch).bind(p.tenure_year.as_deref().unwrap_or("2025-2026"))
         .bind(p.is_current.unwrap_or(true)).bind(p.is_faculty_advisor.unwrap_or(false))
         .bind(&p.bio).bind(&p.linkedin_url).bind(&p.email).bind(p.display_order.unwrap_or(99))
         .execute(&pool).await?;
-    Ok(Json(DeleteResponse { message: "Created".into() }))
+    Ok(Json(DeleteResponse {
+        message: "Created".into(),
+    }))
 }
 
 #[axum::debug_handler]
@@ -340,6 +620,9 @@ async fn update_team_member(
     Path(id): Path<i64>,
     Json(p): Json<CreateTeamMember>,
 ) -> Result<Json<DeleteResponse>, AppError> {
+    if p.name.trim().is_empty() {
+        return Err(AppError::BadRequest("name is required".into()));
+    }
     sqlx::query("UPDATE team_members SET name=?1,role=?2,role_responsibility=?3,photo_url=?4,batch=?5,tenure_year=?6,is_current=?7,is_faculty_advisor=?8,bio=?9,linkedin_url=?10,email=?11,display_order=?12 WHERE id=?13")
         .bind(&p.name).bind(&p.role).bind(&p.role_responsibility).bind(&p.photo_url)
         .bind(&p.batch).bind(p.tenure_year.as_deref().unwrap_or("2025-2026"))
@@ -347,7 +630,9 @@ async fn update_team_member(
         .bind(&p.bio).bind(&p.linkedin_url).bind(&p.email).bind(p.display_order.unwrap_or(99))
         .bind(id)
         .execute(&pool).await?;
-    Ok(Json(DeleteResponse { message: "Updated".into() }))
+    Ok(Json(DeleteResponse {
+        message: "Updated".into(),
+    }))
 }
 
 #[axum::debug_handler]
@@ -356,11 +641,18 @@ async fn delete_team_member(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
 ) -> Result<Json<DeleteResponse>, AppError> {
-    sqlx::query("DELETE FROM team_members WHERE id=?1").bind(id).execute(&pool).await?;
-    Ok(Json(DeleteResponse { message: "Deleted".into() }))
+    sqlx::query("DELETE FROM team_members WHERE id=?1")
+        .bind(id)
+        .execute(&pool)
+        .await?;
+    Ok(Json(DeleteResponse {
+        message: "Deleted".into(),
+    }))
 }
 
+// ---------------------------------------------------------------------------
 // Gallery CRUD
+// ---------------------------------------------------------------------------
 
 #[axum::debug_handler]
 async fn list_gallery(
@@ -379,10 +671,15 @@ async fn create_gallery_image(
     State(pool): State<SqlitePool>,
     Json(p): Json<CreateGalleryImage>,
 ) -> Result<Json<DeleteResponse>, AppError> {
+    if p.image_url.trim().is_empty() {
+        return Err(AppError::BadRequest("image_url is required".into()));
+    }
     sqlx::query("INSERT INTO gallery_images (image_url,caption,event_id,event_name,year) VALUES (?1,?2,?3,?4,?5)")
         .bind(&p.image_url).bind(&p.caption).bind(p.event_id).bind(&p.event_name).bind(&p.year)
         .execute(&pool).await?;
-    Ok(Json(DeleteResponse { message: "Created".into() }))
+    Ok(Json(DeleteResponse {
+        message: "Created".into(),
+    }))
 }
 
 #[axum::debug_handler]
@@ -395,7 +692,9 @@ async fn update_gallery_image(
     sqlx::query("UPDATE gallery_images SET image_url=?1,caption=?2,event_id=?3,event_name=?4,year=?5 WHERE id=?6")
         .bind(&p.image_url).bind(&p.caption).bind(p.event_id).bind(&p.event_name).bind(&p.year).bind(id)
         .execute(&pool).await?;
-    Ok(Json(DeleteResponse { message: "Updated".into() }))
+    Ok(Json(DeleteResponse {
+        message: "Updated".into(),
+    }))
 }
 
 #[axum::debug_handler]
@@ -404,11 +703,18 @@ async fn delete_gallery_image(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
 ) -> Result<Json<DeleteResponse>, AppError> {
-    sqlx::query("DELETE FROM gallery_images WHERE id=?1").bind(id).execute(&pool).await?;
-    Ok(Json(DeleteResponse { message: "Deleted".into() }))
+    sqlx::query("DELETE FROM gallery_images WHERE id=?1")
+        .bind(id)
+        .execute(&pool)
+        .await?;
+    Ok(Json(DeleteResponse {
+        message: "Deleted".into(),
+    }))
 }
 
+// ---------------------------------------------------------------------------
 // Posts CRUD
+// ---------------------------------------------------------------------------
 
 #[axum::debug_handler]
 async fn list_posts(
@@ -427,6 +733,14 @@ async fn create_post(
     State(pool): State<SqlitePool>,
     Json(p): Json<CreatePost>,
 ) -> Result<Json<DeleteResponse>, AppError> {
+    if p.title.trim().is_empty() {
+        return Err(AppError::BadRequest("title is required".into()));
+    }
+    if p.title.len() > 300 {
+        return Err(AppError::BadRequest(
+            "title must be at most 300 characters".into(),
+        ));
+    }
     let slug = p.slug.unwrap_or_else(|| slugify(&p.title));
     sqlx::query("INSERT INTO posts (title,slug,excerpt,body_markdown,author_name,author_batch,cover_image_url,category,material_formula,crystal_structure) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)")
         .bind(&p.title).bind(&slug).bind(&p.excerpt).bind(&p.body_markdown)
@@ -434,7 +748,9 @@ async fn create_post(
         .bind(p.category.as_deref().unwrap_or("Explainer"))
         .bind(&p.material_formula).bind(&p.crystal_structure)
         .execute(&pool).await?;
-    Ok(Json(DeleteResponse { message: "Created".into() }))
+    Ok(Json(DeleteResponse {
+        message: "Created".into(),
+    }))
 }
 
 #[axum::debug_handler]
@@ -444,6 +760,9 @@ async fn update_post(
     Path(id): Path<i64>,
     Json(p): Json<CreatePost>,
 ) -> Result<Json<DeleteResponse>, AppError> {
+    if p.title.trim().is_empty() {
+        return Err(AppError::BadRequest("title is required".into()));
+    }
     let slug = p.slug.unwrap_or_else(|| slugify(&p.title));
     sqlx::query("UPDATE posts SET title=?1,slug=?2,excerpt=?3,body_markdown=?4,author_name=?5,author_batch=?6,cover_image_url=?7,category=?8,material_formula=?9,crystal_structure=?10 WHERE id=?11")
         .bind(&p.title).bind(&slug).bind(&p.excerpt).bind(&p.body_markdown)
@@ -452,7 +771,9 @@ async fn update_post(
         .bind(&p.material_formula).bind(&p.crystal_structure)
         .bind(id)
         .execute(&pool).await?;
-    Ok(Json(DeleteResponse { message: "Updated".into() }))
+    Ok(Json(DeleteResponse {
+        message: "Updated".into(),
+    }))
 }
 
 #[axum::debug_handler]
@@ -461,11 +782,18 @@ async fn delete_post(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
 ) -> Result<Json<DeleteResponse>, AppError> {
-    sqlx::query("DELETE FROM posts WHERE id=?1").bind(id).execute(&pool).await?;
-    Ok(Json(DeleteResponse { message: "Deleted".into() }))
+    sqlx::query("DELETE FROM posts WHERE id=?1")
+        .bind(id)
+        .execute(&pool)
+        .await?;
+    Ok(Json(DeleteResponse {
+        message: "Deleted".into(),
+    }))
 }
 
+// ---------------------------------------------------------------------------
 // Resources CRUD
+// ---------------------------------------------------------------------------
 
 #[axum::debug_handler]
 async fn list_resources(
@@ -484,11 +812,19 @@ async fn create_resource(
     State(pool): State<SqlitePool>,
     Json(p): Json<CreateResource>,
 ) -> Result<Json<DeleteResponse>, AppError> {
+    if p.title.trim().is_empty() {
+        return Err(AppError::BadRequest("title is required".into()));
+    }
+    if p.url.trim().is_empty() {
+        return Err(AppError::BadRequest("url is required".into()));
+    }
     sqlx::query("INSERT INTO resources (title,url,category,software_tag,description,is_pinned) VALUES (?1,?2,?3,?4,?5,?6)")
         .bind(&p.title).bind(&p.url).bind(p.category.as_deref().unwrap_or("Software Guides"))
         .bind(&p.software_tag).bind(&p.description).bind(p.is_pinned.unwrap_or(false))
         .execute(&pool).await?;
-    Ok(Json(DeleteResponse { message: "Created".into() }))
+    Ok(Json(DeleteResponse {
+        message: "Created".into(),
+    }))
 }
 
 #[axum::debug_handler]
@@ -498,11 +834,16 @@ async fn update_resource(
     Path(id): Path<i64>,
     Json(p): Json<CreateResource>,
 ) -> Result<Json<DeleteResponse>, AppError> {
+    if p.title.trim().is_empty() {
+        return Err(AppError::BadRequest("title is required".into()));
+    }
     sqlx::query("UPDATE resources SET title=?1,url=?2,category=?3,software_tag=?4,description=?5,is_pinned=?6 WHERE id=?7")
         .bind(&p.title).bind(&p.url).bind(p.category.as_deref().unwrap_or("Software Guides"))
         .bind(&p.software_tag).bind(&p.description).bind(p.is_pinned.unwrap_or(false)).bind(id)
         .execute(&pool).await?;
-    Ok(Json(DeleteResponse { message: "Updated".into() }))
+    Ok(Json(DeleteResponse {
+        message: "Updated".into(),
+    }))
 }
 
 #[axum::debug_handler]
@@ -511,11 +852,18 @@ async fn delete_resource(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
 ) -> Result<Json<DeleteResponse>, AppError> {
-    sqlx::query("DELETE FROM resources WHERE id=?1").bind(id).execute(&pool).await?;
-    Ok(Json(DeleteResponse { message: "Deleted".into() }))
+    sqlx::query("DELETE FROM resources WHERE id=?1")
+        .bind(id)
+        .execute(&pool)
+        .await?;
+    Ok(Json(DeleteResponse {
+        message: "Deleted".into(),
+    }))
 }
 
+// ---------------------------------------------------------------------------
 // Opportunities CRUD
+// ---------------------------------------------------------------------------
 
 #[axum::debug_handler]
 async fn list_opportunities(
@@ -534,11 +882,19 @@ async fn create_opportunity(
     State(pool): State<SqlitePool>,
     Json(p): Json<CreateOpportunity>,
 ) -> Result<Json<DeleteResponse>, AppError> {
+    if p.title.trim().is_empty() {
+        return Err(AppError::BadRequest("title is required".into()));
+    }
+    if p.organization.trim().is_empty() {
+        return Err(AppError::BadRequest("organization is required".into()));
+    }
     sqlx::query("INSERT INTO opportunities (title,organization,opportunity_type,location,deadline,apply_url,description,posted_by_alumnus) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)")
         .bind(&p.title).bind(&p.organization).bind(p.opportunity_type.as_deref().unwrap_or("Internship"))
         .bind(&p.location).bind(&p.deadline).bind(&p.apply_url).bind(&p.description).bind(&p.posted_by_alumnus)
         .execute(&pool).await?;
-    Ok(Json(DeleteResponse { message: "Created".into() }))
+    Ok(Json(DeleteResponse {
+        message: "Created".into(),
+    }))
 }
 
 #[axum::debug_handler]
@@ -548,12 +904,17 @@ async fn update_opportunity(
     Path(id): Path<i64>,
     Json(p): Json<CreateOpportunity>,
 ) -> Result<Json<DeleteResponse>, AppError> {
+    if p.title.trim().is_empty() {
+        return Err(AppError::BadRequest("title is required".into()));
+    }
     sqlx::query("UPDATE opportunities SET title=?1,organization=?2,opportunity_type=?3,location=?4,deadline=?5,apply_url=?6,description=?7,posted_by_alumnus=?8 WHERE id=?9")
         .bind(&p.title).bind(&p.organization).bind(p.opportunity_type.as_deref().unwrap_or("Internship"))
         .bind(&p.location).bind(&p.deadline).bind(&p.apply_url).bind(&p.description).bind(&p.posted_by_alumnus)
         .bind(id)
         .execute(&pool).await?;
-    Ok(Json(DeleteResponse { message: "Updated".into() }))
+    Ok(Json(DeleteResponse {
+        message: "Updated".into(),
+    }))
 }
 
 #[axum::debug_handler]
@@ -562,11 +923,18 @@ async fn delete_opportunity(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
 ) -> Result<Json<DeleteResponse>, AppError> {
-    sqlx::query("DELETE FROM opportunities WHERE id=?1").bind(id).execute(&pool).await?;
-    Ok(Json(DeleteResponse { message: "Deleted".into() }))
+    sqlx::query("DELETE FROM opportunities WHERE id=?1")
+        .bind(id)
+        .execute(&pool)
+        .await?;
+    Ok(Json(DeleteResponse {
+        message: "Deleted".into(),
+    }))
 }
 
+// ---------------------------------------------------------------------------
 // Alumni CRUD
+// ---------------------------------------------------------------------------
 
 #[axum::debug_handler]
 async fn list_alumni(
@@ -585,12 +953,20 @@ async fn create_alumnus(
     State(pool): State<SqlitePool>,
     Json(p): Json<CreateAlumnus>,
 ) -> Result<Json<DeleteResponse>, AppError> {
+    if p.name.trim().is_empty() {
+        return Err(AppError::BadRequest("name is required".into()));
+    }
+    if p.batch.trim().is_empty() {
+        return Err(AppError::BadRequest("batch is required".into()));
+    }
     sqlx::query("INSERT INTO alumni (name,batch,current_position,organization,location,photo_url,quote_testimonial,linkedin_url,research_domain) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)")
         .bind(&p.name).bind(&p.batch).bind(&p.current_position).bind(&p.organization)
         .bind(&p.location).bind(&p.photo_url).bind(&p.quote_testimonial)
         .bind(&p.linkedin_url).bind(&p.research_domain)
         .execute(&pool).await?;
-    Ok(Json(DeleteResponse { message: "Created".into() }))
+    Ok(Json(DeleteResponse {
+        message: "Created".into(),
+    }))
 }
 
 #[axum::debug_handler]
@@ -600,12 +976,17 @@ async fn update_alumnus(
     Path(id): Path<i64>,
     Json(p): Json<CreateAlumnus>,
 ) -> Result<Json<DeleteResponse>, AppError> {
+    if p.name.trim().is_empty() {
+        return Err(AppError::BadRequest("name is required".into()));
+    }
     sqlx::query("UPDATE alumni SET name=?1,batch=?2,current_position=?3,organization=?4,location=?5,photo_url=?6,quote_testimonial=?7,linkedin_url=?8,research_domain=?9 WHERE id=?10")
         .bind(&p.name).bind(&p.batch).bind(&p.current_position).bind(&p.organization)
         .bind(&p.location).bind(&p.photo_url).bind(&p.quote_testimonial)
         .bind(&p.linkedin_url).bind(&p.research_domain).bind(id)
         .execute(&pool).await?;
-    Ok(Json(DeleteResponse { message: "Updated".into() }))
+    Ok(Json(DeleteResponse {
+        message: "Updated".into(),
+    }))
 }
 
 #[axum::debug_handler]
@@ -614,11 +995,18 @@ async fn delete_alumnus(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
 ) -> Result<Json<DeleteResponse>, AppError> {
-    sqlx::query("DELETE FROM alumni WHERE id=?1").bind(id).execute(&pool).await?;
-    Ok(Json(DeleteResponse { message: "Deleted".into() }))
+    sqlx::query("DELETE FROM alumni WHERE id=?1")
+        .bind(id)
+        .execute(&pool)
+        .await?;
+    Ok(Json(DeleteResponse {
+        message: "Deleted".into(),
+    }))
 }
 
+// ---------------------------------------------------------------------------
 // Projects CRUD
+// ---------------------------------------------------------------------------
 
 #[axum::debug_handler]
 async fn list_projects(
@@ -637,12 +1025,23 @@ async fn create_project(
     State(pool): State<SqlitePool>,
     Json(p): Json<CreateProject>,
 ) -> Result<Json<DeleteResponse>, AppError> {
+    if p.title.trim().is_empty() {
+        return Err(AppError::BadRequest("title is required".into()));
+    }
+    if p.student_names.trim().is_empty() {
+        return Err(AppError::BadRequest("student_names is required".into()));
+    }
+    if p.batch.trim().is_empty() {
+        return Err(AppError::BadRequest("batch is required".into()));
+    }
     sqlx::query("INSERT INTO projects (title,student_names,batch,supervisor_name,project_type,abstract_summary,image_url,paper_or_repo_url,tags) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)")
         .bind(&p.title).bind(&p.student_names).bind(&p.batch).bind(&p.supervisor_name)
         .bind(p.project_type.as_deref().unwrap_or("FYP Highlight"))
         .bind(&p.abstract_summary).bind(&p.image_url).bind(&p.paper_or_repo_url).bind(&p.tags)
         .execute(&pool).await?;
-    Ok(Json(DeleteResponse { message: "Created".into() }))
+    Ok(Json(DeleteResponse {
+        message: "Created".into(),
+    }))
 }
 
 #[axum::debug_handler]
@@ -652,13 +1051,18 @@ async fn update_project(
     Path(id): Path<i64>,
     Json(p): Json<CreateProject>,
 ) -> Result<Json<DeleteResponse>, AppError> {
+    if p.title.trim().is_empty() {
+        return Err(AppError::BadRequest("title is required".into()));
+    }
     sqlx::query("UPDATE projects SET title=?1,student_names=?2,batch=?3,supervisor_name=?4,project_type=?5,abstract_summary=?6,image_url=?7,paper_or_repo_url=?8,tags=?9 WHERE id=?10")
         .bind(&p.title).bind(&p.student_names).bind(&p.batch).bind(&p.supervisor_name)
         .bind(p.project_type.as_deref().unwrap_or("FYP Highlight"))
         .bind(&p.abstract_summary).bind(&p.image_url).bind(&p.paper_or_repo_url).bind(&p.tags)
         .bind(id)
         .execute(&pool).await?;
-    Ok(Json(DeleteResponse { message: "Updated".into() }))
+    Ok(Json(DeleteResponse {
+        message: "Updated".into(),
+    }))
 }
 
 #[axum::debug_handler]
@@ -667,11 +1071,18 @@ async fn delete_project(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
 ) -> Result<Json<DeleteResponse>, AppError> {
-    sqlx::query("DELETE FROM projects WHERE id=?1").bind(id).execute(&pool).await?;
-    Ok(Json(DeleteResponse { message: "Deleted".into() }))
+    sqlx::query("DELETE FROM projects WHERE id=?1")
+        .bind(id)
+        .execute(&pool)
+        .await?;
+    Ok(Json(DeleteResponse {
+        message: "Deleted".into(),
+    }))
 }
 
+// ---------------------------------------------------------------------------
 // Sponsors CRUD
+// ---------------------------------------------------------------------------
 
 #[axum::debug_handler]
 async fn list_sponsors(
@@ -690,11 +1101,19 @@ async fn create_sponsor(
     State(pool): State<SqlitePool>,
     Json(p): Json<CreateSponsor>,
 ) -> Result<Json<DeleteResponse>, AppError> {
+    if p.name.trim().is_empty() {
+        return Err(AppError::BadRequest("name is required".into()));
+    }
     sqlx::query("INSERT INTO sponsors (name,logo_url,website_url,tier) VALUES (?1,?2,?3,?4)")
-        .bind(&p.name).bind(&p.logo_url).bind(&p.website_url)
+        .bind(&p.name)
+        .bind(&p.logo_url)
+        .bind(&p.website_url)
         .bind(p.tier.as_deref().unwrap_or("Partner"))
-        .execute(&pool).await?;
-    Ok(Json(DeleteResponse { message: "Created".into() }))
+        .execute(&pool)
+        .await?;
+    Ok(Json(DeleteResponse {
+        message: "Created".into(),
+    }))
 }
 
 #[axum::debug_handler]
@@ -704,11 +1123,20 @@ async fn update_sponsor(
     Path(id): Path<i64>,
     Json(p): Json<CreateSponsor>,
 ) -> Result<Json<DeleteResponse>, AppError> {
+    if p.name.trim().is_empty() {
+        return Err(AppError::BadRequest("name is required".into()));
+    }
     sqlx::query("UPDATE sponsors SET name=?1,logo_url=?2,website_url=?3,tier=?4 WHERE id=?5")
-        .bind(&p.name).bind(&p.logo_url).bind(&p.website_url)
-        .bind(p.tier.as_deref().unwrap_or("Partner")).bind(id)
-        .execute(&pool).await?;
-    Ok(Json(DeleteResponse { message: "Updated".into() }))
+        .bind(&p.name)
+        .bind(&p.logo_url)
+        .bind(&p.website_url)
+        .bind(p.tier.as_deref().unwrap_or("Partner"))
+        .bind(id)
+        .execute(&pool)
+        .await?;
+    Ok(Json(DeleteResponse {
+        message: "Updated".into(),
+    }))
 }
 
 #[axum::debug_handler]
@@ -717,11 +1145,18 @@ async fn delete_sponsor(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
 ) -> Result<Json<DeleteResponse>, AppError> {
-    sqlx::query("DELETE FROM sponsors WHERE id=?1").bind(id).execute(&pool).await?;
-    Ok(Json(DeleteResponse { message: "Deleted".into() }))
+    sqlx::query("DELETE FROM sponsors WHERE id=?1")
+        .bind(id)
+        .execute(&pool)
+        .await?;
+    Ok(Json(DeleteResponse {
+        message: "Deleted".into(),
+    }))
 }
 
+// ---------------------------------------------------------------------------
 // FAQs CRUD
+// ---------------------------------------------------------------------------
 
 #[axum::debug_handler]
 async fn list_faqs(
@@ -729,8 +1164,10 @@ async fn list_faqs(
     State(pool): State<SqlitePool>,
 ) -> Result<Json<Vec<Faq>>, AppError> {
     let rows = sqlx::query_as::<_, Faq>(
-        "SELECT id, question, answer, display_order FROM faqs ORDER BY display_order ASC"
-    ).fetch_all(&pool).await?;
+        "SELECT id, question, answer, display_order FROM faqs ORDER BY display_order ASC",
+    )
+    .fetch_all(&pool)
+    .await?;
     Ok(Json(rows))
 }
 
@@ -740,10 +1177,21 @@ async fn create_faq(
     State(pool): State<SqlitePool>,
     Json(p): Json<CreateFaq>,
 ) -> Result<Json<DeleteResponse>, AppError> {
+    if p.question.trim().is_empty() {
+        return Err(AppError::BadRequest("question is required".into()));
+    }
+    if p.answer.trim().is_empty() {
+        return Err(AppError::BadRequest("answer is required".into()));
+    }
     sqlx::query("INSERT INTO faqs (question,answer,display_order) VALUES (?1,?2,?3)")
-        .bind(&p.question).bind(&p.answer).bind(p.display_order.unwrap_or(99))
-        .execute(&pool).await?;
-    Ok(Json(DeleteResponse { message: "Created".into() }))
+        .bind(&p.question)
+        .bind(&p.answer)
+        .bind(p.display_order.unwrap_or(99))
+        .execute(&pool)
+        .await?;
+    Ok(Json(DeleteResponse {
+        message: "Created".into(),
+    }))
 }
 
 #[axum::debug_handler]
@@ -753,10 +1201,19 @@ async fn update_faq(
     Path(id): Path<i64>,
     Json(p): Json<CreateFaq>,
 ) -> Result<Json<DeleteResponse>, AppError> {
+    if p.question.trim().is_empty() {
+        return Err(AppError::BadRequest("question is required".into()));
+    }
     sqlx::query("UPDATE faqs SET question=?1,answer=?2,display_order=?3 WHERE id=?4")
-        .bind(&p.question).bind(&p.answer).bind(p.display_order.unwrap_or(99)).bind(id)
-        .execute(&pool).await?;
-    Ok(Json(DeleteResponse { message: "Updated".into() }))
+        .bind(&p.question)
+        .bind(&p.answer)
+        .bind(p.display_order.unwrap_or(99))
+        .bind(id)
+        .execute(&pool)
+        .await?;
+    Ok(Json(DeleteResponse {
+        message: "Updated".into(),
+    }))
 }
 
 #[axum::debug_handler]
@@ -765,11 +1222,18 @@ async fn delete_faq(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
 ) -> Result<Json<DeleteResponse>, AppError> {
-    sqlx::query("DELETE FROM faqs WHERE id=?1").bind(id).execute(&pool).await?;
-    Ok(Json(DeleteResponse { message: "Deleted".into() }))
+    sqlx::query("DELETE FROM faqs WHERE id=?1")
+        .bind(id)
+        .execute(&pool)
+        .await?;
+    Ok(Json(DeleteResponse {
+        message: "Deleted".into(),
+    }))
 }
 
+// ---------------------------------------------------------------------------
 // Membership Applications
+// ---------------------------------------------------------------------------
 
 #[axum::debug_handler]
 async fn list_membership(
@@ -789,10 +1253,18 @@ async fn update_membership_status(
     Path(id): Path<i64>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<DeleteResponse>, AppError> {
-    let status = body.get("status").and_then(|s| s.as_str()).unwrap_or("Pending");
+    let status = body
+        .get("status")
+        .and_then(|s| s.as_str())
+        .unwrap_or("Pending");
     sqlx::query("UPDATE membership_applications SET status=?1 WHERE id=?2")
-        .bind(status).bind(id).execute(&pool).await?;
-    Ok(Json(DeleteResponse { message: "Updated".into() }))
+        .bind(status)
+        .bind(id)
+        .execute(&pool)
+        .await?;
+    Ok(Json(DeleteResponse {
+        message: "Updated".into(),
+    }))
 }
 
 #[axum::debug_handler]
@@ -801,11 +1273,18 @@ async fn delete_membership(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
 ) -> Result<Json<DeleteResponse>, AppError> {
-    sqlx::query("DELETE FROM membership_applications WHERE id=?1").bind(id).execute(&pool).await?;
-    Ok(Json(DeleteResponse { message: "Deleted".into() }))
+    sqlx::query("DELETE FROM membership_applications WHERE id=?1")
+        .bind(id)
+        .execute(&pool)
+        .await?;
+    Ok(Json(DeleteResponse {
+        message: "Deleted".into(),
+    }))
 }
 
+// ---------------------------------------------------------------------------
 // Contact Messages
+// ---------------------------------------------------------------------------
 
 #[axum::debug_handler]
 async fn list_contacts(
@@ -824,11 +1303,18 @@ async fn delete_contact(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
 ) -> Result<Json<DeleteResponse>, AppError> {
-    sqlx::query("DELETE FROM contact_messages WHERE id=?1").bind(id).execute(&pool).await?;
-    Ok(Json(DeleteResponse { message: "Deleted".into() }))
+    sqlx::query("DELETE FROM contact_messages WHERE id=?1")
+        .bind(id)
+        .execute(&pool)
+        .await?;
+    Ok(Json(DeleteResponse {
+        message: "Deleted".into(),
+    }))
 }
 
+// ---------------------------------------------------------------------------
 // Newsletter
+// ---------------------------------------------------------------------------
 
 #[axum::debug_handler]
 async fn list_newsletter(
@@ -836,8 +1322,10 @@ async fn list_newsletter(
     State(pool): State<SqlitePool>,
 ) -> Result<Json<Vec<NewsletterSubscriber>>, AppError> {
     let rows = sqlx::query_as::<_, NewsletterSubscriber>(
-        "SELECT id, email, subscribed_at FROM newsletter_subscribers ORDER BY id DESC"
-    ).fetch_all(&pool).await?;
+        "SELECT id, email, subscribed_at FROM newsletter_subscribers ORDER BY id DESC",
+    )
+    .fetch_all(&pool)
+    .await?;
     Ok(Json(rows))
 }
 
@@ -847,8 +1335,13 @@ async fn delete_subscriber(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
 ) -> Result<Json<DeleteResponse>, AppError> {
-    sqlx::query("DELETE FROM newsletter_subscribers WHERE id=?1").bind(id).execute(&pool).await?;
-    Ok(Json(DeleteResponse { message: "Deleted".into() }))
+    sqlx::query("DELETE FROM newsletter_subscribers WHERE id=?1")
+        .bind(id)
+        .execute(&pool)
+        .await?;
+    Ok(Json(DeleteResponse {
+        message: "Deleted".into(),
+    }))
 }
 
 #[axum::debug_handler]
@@ -857,6 +1350,12 @@ async fn create_membership_from_admin(
     State(pool): State<SqlitePool>,
     Json(payload): Json<CreateMembershipApplication>,
 ) -> Result<Json<DeleteResponse>, AppError> {
+    if payload.full_name.trim().is_empty() {
+        return Err(AppError::BadRequest("full_name is required".into()));
+    }
+    if payload.email.trim().is_empty() || !payload.email.contains('@') {
+        return Err(AppError::BadRequest("A valid email is required".into()));
+    }
     sqlx::query(
         "INSERT INTO membership_applications (full_name, roll_number, batch, department, email, phone, interests, why_join) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
     )
@@ -870,10 +1369,14 @@ async fn create_membership_from_admin(
     .bind(&payload.why_join)
     .execute(&pool)
     .await?;
-    Ok(Json(DeleteResponse { message: "Created membership record".into() }))
+    Ok(Json(DeleteResponse {
+        message: "Created membership record".into(),
+    }))
 }
 
+// ---------------------------------------------------------------------------
 // Sections (Editable Content)
+// ---------------------------------------------------------------------------
 
 #[axum::debug_handler]
 async fn list_sections(
@@ -892,6 +1395,9 @@ async fn create_section(
     State(pool): State<SqlitePool>,
     Json(p): Json<CreateSiteSection>,
 ) -> Result<Json<DeleteResponse>, AppError> {
+    if p.section_key.trim().is_empty() {
+        return Err(AppError::BadRequest("section_key is required".into()));
+    }
     sqlx::query("INSERT INTO site_sections (section_key, title, subtitle, content, badge, extra_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6)")
         .bind(&p.section_key)
         .bind(&p.title)
@@ -900,7 +1406,9 @@ async fn create_section(
         .bind(&p.badge)
         .bind(&p.extra_json)
         .execute(&pool).await?;
-    Ok(Json(DeleteResponse { message: "Created section".into() }))
+    Ok(Json(DeleteResponse {
+        message: "Created section".into(),
+    }))
 }
 
 #[axum::debug_handler]
@@ -920,7 +1428,9 @@ async fn update_section(
     .bind(&p.extra_json)
     .bind(id)
     .execute(&pool).await?;
-    Ok(Json(DeleteResponse { message: "Updated section".into() }))
+    Ok(Json(DeleteResponse {
+        message: "Updated section".into(),
+    }))
 }
 
 #[axum::debug_handler]
@@ -929,11 +1439,18 @@ async fn delete_section(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
 ) -> Result<Json<DeleteResponse>, AppError> {
-    sqlx::query("DELETE FROM site_sections WHERE id=?1").bind(id).execute(&pool).await?;
-    Ok(Json(DeleteResponse { message: "Deleted section".into() }))
+    sqlx::query("DELETE FROM site_sections WHERE id=?1")
+        .bind(id)
+        .execute(&pool)
+        .await?;
+    Ok(Json(DeleteResponse {
+        message: "Deleted section".into(),
+    }))
 }
 
+// ---------------------------------------------------------------------------
 // Utility
+// ---------------------------------------------------------------------------
 
 fn slugify(s: &str) -> String {
     s.to_lowercase()
@@ -945,4 +1462,3 @@ fn slugify(s: &str) -> String {
         .collect::<Vec<&str>>()
         .join("-")
 }
-

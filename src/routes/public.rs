@@ -8,6 +8,7 @@ use sqlx::SqlitePool;
 
 use crate::error::AppError;
 use crate::models::*;
+use crate::rate_limit::{client_ip_from_headers, RateLimitState};
 
 /// Query parameters for filtering
 #[derive(Debug, Deserialize)]
@@ -65,7 +66,7 @@ pub fn public_routes() -> Router<SqlitePool> {
         // Events
         .route("/api/events", get(get_events))
         .route("/api/events/{id}", get(get_event))
-        // Event Registration
+        // Event Registration (rate-limited)
         .route("/api/events/{id}/register", post(register_for_event))
         // Certificate Verification
         .route("/api/certificates/verify", get(verify_certificate))
@@ -88,18 +89,24 @@ pub fn public_routes() -> Router<SqlitePool> {
         .route("/api/sponsors", get(get_sponsors))
         // FAQs
         .route("/api/faqs", get(get_faqs))
-        // Membership Application
+        // Membership Application (rate-limited)
         .route("/api/membership", post(submit_membership))
-        // Contact Message
+        // Contact Message (rate-limited)
         .route("/api/contact", post(submit_contact))
-        // Newsletter
+        // Newsletter (rate-limited)
         .route("/api/newsletter", post(subscribe_newsletter))
         // Site Sections (Editable Content)
         .route("/api/sections", get(get_sections))
 }
 
+// ---------------------------------------------------------------------------
+// Public read endpoints
+// ---------------------------------------------------------------------------
+
 #[axum::debug_handler]
-async fn get_announcements(State(pool): State<SqlitePool>) -> Result<Json<Vec<Announcement>>, AppError> {
+async fn get_announcements(
+    State(pool): State<SqlitePool>,
+) -> Result<Json<Vec<Announcement>>, AppError> {
     let rows = sqlx::query_as::<_, Announcement>(
         "SELECT id, message, link_text, link_url, priority, is_active, created_at FROM announcements WHERE is_active = 1 ORDER BY created_at DESC"
     )
@@ -158,8 +165,29 @@ async fn get_event(
 async fn register_for_event(
     State(pool): State<SqlitePool>,
     Path(event_id): Path<i64>,
+    headers: axum::http::HeaderMap,
     Json(payload): Json<CreateEventRegistration>,
 ) -> Result<Json<EventRegistration>, AppError> {
+    let ip = client_ip_from_headers(&headers);
+    RateLimitState::global().check_submit(ip)?;
+
+    // Input validation
+    if payload.student_name.trim().is_empty() {
+        return Err(AppError::BadRequest("student_name is required".into()));
+    }
+    if payload.email.trim().is_empty() || !payload.email.contains('@') {
+        return Err(AppError::BadRequest("A valid email is required".into()));
+    }
+    if payload.roll_number.trim().is_empty() {
+        return Err(AppError::BadRequest("roll_number is required".into()));
+    }
+    if payload.batch.trim().is_empty() {
+        return Err(AppError::BadRequest("batch is required".into()));
+    }
+    if payload.department.trim().is_empty() {
+        return Err(AppError::BadRequest("department is required".into()));
+    }
+
     // Check event exists
     let _event = sqlx::query("SELECT id FROM events WHERE id = ?1")
         .bind(event_id)
@@ -167,7 +195,11 @@ async fn register_for_event(
         .await?
         .ok_or(AppError::NotFound)?;
 
-    let cert_code = format!("PMS-{}-{}", event_id, uuid::Uuid::new_v4().to_string()[..8].to_uppercase());
+    let cert_code = format!(
+        "PMS-{}-{}",
+        event_id,
+        uuid::Uuid::new_v4().to_string()[..8].to_uppercase()
+    );
 
     sqlx::query(
         "INSERT INTO event_registrations (event_id, student_name, roll_number, batch, department, email, phone, certificate_code) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
@@ -249,7 +281,7 @@ async fn get_gallery(
         "SELECT id, image_url, caption, event_id, event_name, year, created_at FROM gallery_images
          WHERE (?1 IS NULL OR year = ?1)
            AND (?2 IS NULL OR event_name = ?2)
-         ORDER BY created_at DESC"
+         ORDER BY created_at DESC",
     )
     .bind(&filter.year)
     .bind(&filter.event_name)
@@ -298,7 +330,7 @@ async fn get_resources(
         "SELECT id, title, url, category, software_tag, description, is_pinned FROM resources
          WHERE (?1 IS NULL OR category = ?1)
            AND (?2 IS NULL OR software_tag = ?2)
-         ORDER BY is_pinned DESC, title ASC"
+         ORDER BY is_pinned DESC, title ASC",
     )
     .bind(&filter.category)
     .bind(&filter.software_tag)
@@ -364,18 +396,49 @@ async fn get_sponsors(State(pool): State<SqlitePool>) -> Result<Json<Vec<Sponsor
 #[axum::debug_handler]
 async fn get_faqs(State(pool): State<SqlitePool>) -> Result<Json<Vec<Faq>>, AppError> {
     let rows = sqlx::query_as::<_, Faq>(
-        "SELECT id, question, answer, display_order FROM faqs ORDER BY display_order ASC"
+        "SELECT id, question, answer, display_order FROM faqs ORDER BY display_order ASC",
     )
     .fetch_all(&pool)
     .await?;
     Ok(Json(rows))
 }
 
+// ---------------------------------------------------------------------------
+// Submit endpoints (with validation)
+// ---------------------------------------------------------------------------
+
 #[axum::debug_handler]
 async fn submit_membership(
     State(pool): State<SqlitePool>,
+    headers: axum::http::HeaderMap,
     Json(payload): Json<CreateMembershipApplication>,
 ) -> Result<Json<MembershipApplication>, AppError> {
+    let ip = client_ip_from_headers(&headers);
+    RateLimitState::global().check_submit(ip)?;
+
+    // Input validation
+    if payload.full_name.trim().is_empty() {
+        return Err(AppError::BadRequest("full_name is required".into()));
+    }
+    if payload.full_name.len() > 200 {
+        return Err(AppError::BadRequest("full_name is too long".into()));
+    }
+    if payload.email.trim().is_empty() || !payload.email.contains('@') {
+        return Err(AppError::BadRequest("A valid email is required".into()));
+    }
+    if payload.email.len() > 254 {
+        return Err(AppError::BadRequest("email is too long".into()));
+    }
+    if payload.roll_number.trim().is_empty() {
+        return Err(AppError::BadRequest("roll_number is required".into()));
+    }
+    if payload.batch.trim().is_empty() {
+        return Err(AppError::BadRequest("batch is required".into()));
+    }
+    if payload.department.trim().is_empty() {
+        return Err(AppError::BadRequest("department is required".into()));
+    }
+
     let res = sqlx::query(
         "INSERT INTO membership_applications (full_name, roll_number, batch, department, email, phone, interests, why_join) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
     )
@@ -405,10 +468,36 @@ async fn submit_membership(
 #[axum::debug_handler]
 async fn submit_contact(
     State(pool): State<SqlitePool>,
+    headers: axum::http::HeaderMap,
     Json(payload): Json<CreateContactMessage>,
 ) -> Result<Json<ContactMessage>, AppError> {
+    let ip = client_ip_from_headers(&headers);
+    RateLimitState::global().check_submit(ip)?;
+
+    // Input validation
+    if payload.name.trim().is_empty() {
+        return Err(AppError::BadRequest("name is required".into()));
+    }
+    if payload.name.len() > 200 {
+        return Err(AppError::BadRequest("name is too long".into()));
+    }
+    if payload.email.trim().is_empty() || !payload.email.contains('@') {
+        return Err(AppError::BadRequest("A valid email is required".into()));
+    }
+    if payload.email.len() > 254 {
+        return Err(AppError::BadRequest("email is too long".into()));
+    }
+    if payload.message.trim().is_empty() {
+        return Err(AppError::BadRequest("message is required".into()));
+    }
+    if payload.message.len() > 5000 {
+        return Err(AppError::BadRequest(
+            "message is too long (max 5000 chars)".into(),
+        ));
+    }
+
     let res = sqlx::query(
-        "INSERT INTO contact_messages (name, email, subject, message) VALUES (?1, ?2, ?3, ?4)"
+        "INSERT INTO contact_messages (name, email, subject, message) VALUES (?1, ?2, ?3, ?4)",
     )
     .bind(&payload.name)
     .bind(&payload.email)
@@ -420,7 +509,7 @@ async fn submit_contact(
     let inserted_id = res.last_insert_rowid();
 
     let msg = sqlx::query_as::<_, ContactMessage>(
-        "SELECT id, name, email, subject, message, created_at FROM contact_messages WHERE id = ?1"
+        "SELECT id, name, email, subject, message, created_at FROM contact_messages WHERE id = ?1",
     )
     .bind(inserted_id)
     .fetch_one(&pool)
@@ -432,15 +521,27 @@ async fn submit_contact(
 #[axum::debug_handler]
 async fn subscribe_newsletter(
     State(pool): State<SqlitePool>,
+    headers: axum::http::HeaderMap,
     Json(payload): Json<CreateNewsletterSubscriber>,
 ) -> Result<Json<NewsletterSubscriber>, AppError> {
+    let ip = client_ip_from_headers(&headers);
+    RateLimitState::global().check_submit(ip)?;
+
+    // Input validation
+    if payload.email.trim().is_empty() || !payload.email.contains('@') {
+        return Err(AppError::BadRequest("A valid email is required".into()));
+    }
+    if payload.email.len() > 254 {
+        return Err(AppError::BadRequest("email is too long".into()));
+    }
+
     sqlx::query("INSERT OR IGNORE INTO newsletter_subscribers (email) VALUES (?1)")
         .bind(&payload.email)
         .execute(&pool)
         .await?;
 
     let sub = sqlx::query_as::<_, NewsletterSubscriber>(
-        "SELECT id, email, subscribed_at FROM newsletter_subscribers WHERE email = ?1"
+        "SELECT id, email, subscribed_at FROM newsletter_subscribers WHERE email = ?1",
     )
     .bind(&payload.email)
     .fetch_one(&pool)
@@ -458,4 +559,3 @@ async fn get_sections(State(pool): State<SqlitePool>) -> Result<Json<Vec<SiteSec
     .await?;
     Ok(Json(rows))
 }
-
